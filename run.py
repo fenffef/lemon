@@ -192,8 +192,10 @@ class DataProcessor:
         examples = []
         for i, (src, trg) in enumerate(lines):
             guid = "%s-%s" % (set_type, i)
-            if len(src) == len(trg):
-                examples.append(InputExample(guid=guid, src=src, trg=trg))
+            # # source
+            # if len(src) == len(trg):
+            #     examples.append(InputExample(guid=guid, src=src, trg=trg))
+            examples.append(InputExample(guid=guid, src=src, trg=trg))
         return examples
 
 
@@ -360,23 +362,25 @@ def main():
     parser = argparse.ArgumentParser()
 
     # Data config
-    parser.add_argument("--data_dir", type=str, default="../data/csc",
+    parser.add_argument("--data_dir", type=str, default="./data/chaizi",
                         help="Directory to contain the input data for all tasks.")
-    parser.add_argument("--train_on", type=str, default="",
+    parser.add_argument("--train_on", type=str, default="train32.txt",
                         help="Specify a training set.")
-    parser.add_argument("--eval_on", type=str, default="",
+    parser.add_argument("--eval_on", type=str, default="test1.txt",
                         help="Specify a dev set.")
-    parser.add_argument("--test_on_lemon", type=str, default="",
+    parser.add_argument("--test_on_lemon", type=str, default="./data/chaizi",
                         help="Specify the directory to LEMON.")
-    parser.add_argument("--load_model_path", type=str, default="bert-base-chinese",
+    parser.add_argument("--load_model_path", type=str, default="models/bert-base-csc",
                         help="Pre-trained model path to load.")
+    # parser.add_argument("--load_model_path", type=str, default="bert-base-chinese",
+                        # help="Pre-trained model path to load.")
     parser.add_argument("--model_type", type=str, default="relm",
                         help="Model architecture to load.")
     parser.add_argument("--cache_dir", type=str, default="../cache/",
                         help="Directory to store the pre-trained language models downloaded from s3.")
-    parser.add_argument("--output_dir", type=str, default="model/",
+    parser.add_argument("--output_dir", type=str, default="relm-abb-chinese/",
                         help="Directory to output predictions and checkpoints.")
-    parser.add_argument("--load_state_dict", type=str, default="",
+    parser.add_argument("--load_state_dict", type=str, default="models/bert-base-csc/pytorch_model.bin",
                         help="Trained model weights to load for evaluation if needed.")
 
     # Training config
@@ -398,7 +402,7 @@ def main():
                         help="Initial learning rate for Adam.")
     parser.add_argument("--num_train_epochs", type=float, default=1000.0,
                         help="Total number of training epochs to perform.")
-    parser.add_argument("--max_train_steps", type=int, default=1000,
+    parser.add_argument("--max_train_steps", type=int, default=10000,
                         help="Total number of training steps to perform. If provided, overrides training epochs.")
     parser.add_argument("--weight_decay", type=float, default=0.,
                         help="L2 weight decay for training.")
@@ -408,7 +412,7 @@ def main():
                         help="Whether not to use CUDA when available.")
     parser.add_argument("--fp16", action="store_true",
                         help="Whether to use mixed precision.")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=2023,
                         help="Random seed for initialization.")
     parser.add_argument("--save_steps", type=int, default=500,
                         help="How many steps to save the checkpoint once.")
@@ -426,6 +430,9 @@ def main():
         "softmasked": AutoCSCSoftMasked,
         "mdcspell": AutoCSCMDCSpell,
         "relm": AutoCSCReLM,
+        "roc": AutoCSCroc,
+        "rocsoft": AutoCSCROCSoftMasked,
+        "rocmdc": AutoCSCROCMDCSpell,
     }
 
     processor = DataProcessorForRephrasing() if relm else DataProcessorForTagging()
@@ -481,7 +488,10 @@ def main():
         else:
             args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-        model = AutoCSC[args.model_type].from_pretrained(args.load_model_path,
+        if "bart" in args.load_model_path:
+            model = SimCTGBART(args.load_model_path)
+        else:
+            model = AutoCSC[args.model_type].from_pretrained(args.load_model_path,
                                                          cache_dir=cache_dir)
         if args.load_state_dict:
             model.load_state_dict(torch.load(args.load_state_dict))
@@ -544,9 +554,14 @@ def main():
                     if args.mft:
                         src_ids = mask_tokens_only_neg(src_ids, trg_ids, tokenizer, args.noise_probability)
 
-                outputs = model(src_ids=src_ids,
-                                attention_mask=attention_mask,
-                                trg_ids=trg_ids)
+                if "bart" in args.load_model_path:
+                    outputs = model(src_ids,
+                                    attention_mask,
+                                    trg_ids)
+                else: 
+                    outputs = model(src_ids=src_ids,
+                                    attention_mask=attention_mask,
+                                    trg_ids=trg_ids)
                 loss = outputs["loss"]
 
                 if n_gpu > 1:
@@ -577,9 +592,13 @@ def main():
                         batch = tuple(t.to(device) for t in batch)
                         src_ids, attention_mask, trg_ids = batch[:3]
                         with torch.no_grad():
-                            outputs = model(src_ids=src_ids,
-                                            attention_mask=attention_mask,
-                                            trg_ids=trg_ids)
+                            if "bart" in args.load_model_path:
+                                outputs = model.module.eval_loss(src_ids,
+                                                trg_ids)
+                            else: 
+                                outputs = model(src_ids=src_ids,
+                                                attention_mask=attention_mask,
+                                                trg_ids=trg_ids)
                             prd_ids = outputs["predict_ids"]
 
                         src_ids, trg_ids, prd_ids = accelerator.gather_for_metrics((src_ids, trg_ids, prd_ids))
@@ -588,11 +607,17 @@ def main():
                                 _t = [tt for tt, st in zip(t, s) if st == tokenizer.mask_token_id]
                                 _p = [pt for pt, st in zip(p, s) if st == tokenizer.mask_token_id]
 
+                                print(decode(s))
+                                print(decode(t))
+                                print(decode(p))
                                 all_inputs += [decode(s)]
                                 all_labels += [decode(_t)]
                                 all_predictions += [decode(_p)]
 
                             else:
+                                # print(decode(s))
+                                # print(decode(t))
+                                # print(decode(p))
                                 all_inputs += [decode(s)]
                                 all_labels += [decode(t)]
                                 all_predictions += [decode(p)]
@@ -652,14 +677,19 @@ def main():
     if args.test_on_lemon:
         accelerator = Accelerator(cpu=args.no_cuda, mixed_precision="fp16" if args.fp16 else "no")
         device = accelerator.device
-
-        model = AutoCSC[args.model_type].from_pretrained(args.load_model_path,
-                                                         state_dict=torch.load(args.load_state_dict),
-                                                         cache_dir=cache_dir)
+        
+        if "bart" in args.load_model_path:
+            model = SimCTGBART(args.load_model_path)
+        else:
+            model = AutoCSC[args.model_type].from_pretrained(args.load_model_path,
+                                                            state_dict=torch.load(args.load_state_dict),
+                                                            cache_dir=cache_dir)
         model = accelerator.prepare(model)
 
         avg = 0
-        for cat in ["gam", "car", "nov", "enc", "new", "cot", "mec", "sig"]:
+        for cat in ["test1"]:
+        # for cat in ["gam", "car", "nov", "enc", "new", "cot", "mec", "sig"]:
+        # for cat in ["car1"]:
             eval_examples = processor.get_test_examples(args.test_on_lemon, cat + ".txt")
             eval_features = processor.convert_examples_to_features(eval_examples, args.max_seq_length, tokenizer, False)
 
@@ -684,9 +714,13 @@ def main():
                 batch = tuple(t.to(device) for t in batch)
                 src_ids, attention_mask, trg_ids = batch[:3]
                 with torch.no_grad():
-                    outputs = model(src_ids=src_ids,
-                                    attention_mask=attention_mask,
-                                    trg_ids=trg_ids)
+                    if "bart" in args.load_model_path:
+                        outputs = model.module.beam_search(src_ids,
+                                                )
+                    else: 
+                        outputs = model(src_ids=src_ids,
+                                        attention_mask=attention_mask,
+                                        trg_ids=trg_ids)
                     prd_ids = outputs["predict_ids"]
 
                 src_ids, trg_ids, prd_ids = accelerator.gather_for_metrics((src_ids, trg_ids, prd_ids))
@@ -700,6 +734,9 @@ def main():
                         all_predictions += [decode(_p)]
 
                     else:
+                        # print(decode(s))
+                        # print(decode(t))
+                        # print(decode(p))
                         all_inputs += [decode(s)]
                         all_labels += [decode(t)]
                         all_predictions += [decode(p)]
@@ -713,9 +750,11 @@ def main():
                 "eval_fpr": fpr * 100,
             }
             avg += f1 * 100
+            logger.info("{}: pre = {}".format(cat.upper(), p * 100))
+            logger.info("{}: rec = {}".format(cat.upper(), r * 100))
             logger.info("{}: F1 = {}".format(cat.upper(), f1 * 100))
 
-        avg /= 8
+        avg /= 1
         logger.info("AVG: F1 = {}".format(avg))
 
 
